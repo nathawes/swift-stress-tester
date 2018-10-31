@@ -96,7 +96,7 @@ struct StressTester {
   }
 
   private func readOnlyRun() throws {
-    var document = SourceKitDocument(file.path, args: compilerArgs, connection: connection)
+    var document = SourceKitDocument(file.path, args: compilerArgs, connection: connection, listener: options.listener)
 
     let (tree, _) = try document.open()
     let (state, actions) = self.computeStartStateAndActions(from: tree)
@@ -143,7 +143,7 @@ struct StressTester {
   }
 
   private func rewriteRun() throws {
-    var document = SourceKitDocument(file.path, args: compilerArgs, connection: connection, containsErrors: true)
+    var document = SourceKitDocument(file.path, args: compilerArgs, connection: connection, containsErrors: true, listener: options.listener)
 
     // compute the actions for the entire tree
     let (tree, _) = try document.open()
@@ -175,6 +175,7 @@ struct StressTesterOptions {
   var requests: RequestSet = .all
   var rewriteMode: RewriteMode = .none
   var page = Page(1, of: 1)
+  var listener: RequestListener? = nil
 }
 
 public struct RequestSet: OptionSet {

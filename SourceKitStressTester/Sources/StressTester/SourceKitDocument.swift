@@ -20,6 +20,7 @@ struct SourceKitDocument {
   let args: [String]
   let containsErrors: Bool
   let connection: SourceKitdService
+  let listener: RequestListener?
 
   private var deserializer: SyntaxTreeDeserializer? = nil
   private var tree: SourceFileSyntax? = nil
@@ -33,11 +34,12 @@ struct SourceKitDocument {
     return DocumentInfo(path: file, modification: modification)
   }
 
-  init(_ file: String, args: [String], connection: SourceKitdService, containsErrors: Bool = false) {
+  init(_ file: String, args: [String], connection: SourceKitdService, containsErrors: Bool = false, listener: RequestListener? = nil) {
     self.file = file
     self.args = args
     self.containsErrors = containsErrors
     self.connection = connection
+    self.listener = listener
   }
 
   mutating func open(state: SourceState? = nil) throws -> (SourceFileSyntax, SourceKitdResponse) {
@@ -209,12 +211,14 @@ struct SourceKitDocument {
   private func sendWithTimeout(_ request: SourceKitdRequest, info: RequestInfo) throws -> SourceKitdResponse {
     var response: SourceKitdResponse? = nil
     let completed = DispatchSemaphore(value: 0)
+    let timeBeforeSend = Date()
     connection.send(request: request) {
       response = $0
       completed.signal()
     }
     switch completed.wait(timeout: .now() + DispatchTimeInterval.seconds(60)) {
     case .success:
+      listener?.receivedResponse(response!.description, for: info, after: -timeBeforeSend.timeIntervalSinceNow)
       return response!
     case .timedOut:
       throw SourceKitError.timedOut(request: info)
@@ -291,4 +295,8 @@ struct SourceState {
     wasModified = wasModified || changed
     return changed
   }
+}
+
+protocol RequestListener {
+  func receivedResponse(_ response: String, for request: RequestInfo, after seconds: TimeInterval)
 }

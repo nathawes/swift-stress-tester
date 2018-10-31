@@ -32,6 +32,7 @@ public struct StressTesterTool {
   let dryRun: OptionArgument<Bool>
   let file: PositionalArgument<PathArgument>
   let compilerArgs: PositionalArgument<[String]>
+  let statsOutputFile: OptionArgument<String>
 
   public init(arguments: [String]) {
     self.arguments = Array(arguments.dropFirst())
@@ -59,6 +60,9 @@ public struct StressTesterTool {
     file = parser.add(
       positional: "<source-file>", kind: PathArgument.self, optional: false,
       usage: "A Swift source file to stress test", completion: .filename)
+    statsOutputFile = parser.add(
+      option: "--stats-output", shortName: "-s", kind: String.self,
+      usage: "<PATH> A path to write out performance metrics to")
 
     // Note: the required 'swiftc' is to workaround ArgumentParser treating a
     // compiler option in the first position as something it should parse as an
@@ -104,6 +108,12 @@ public struct StressTesterTool {
       options.requests = requests.reduce([]) { result, next in result.union(next) }
     }
 
+    var collector: PerformanceDataCollector? = nil
+    if let statsFile = arguments.get(statsOutputFile) {
+      collector = PerformanceDataCollector()
+      options.listener = collector
+    }
+
     let format = arguments.get(self.format) ?? .humanReadable
     let dryRun = arguments.get(self.dryRun) ?? false
 
@@ -117,6 +127,10 @@ public struct StressTesterTool {
         try report(tester.computeStartStateAndActions(from: tree).actions, as: format)
       } else {
         try tester.run()
+        if let collector = collector, let statsFile = arguments.get(statsOutputFile) {
+          try collector.description.write(to: URL(fileURLWithPath: statsFile, isDirectory: false),
+                                          atomically: false, encoding: .utf8)
+        }
       }
     } catch let error as SourceKitError {
       let message = StressTesterMessage.detected(error)
