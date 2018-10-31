@@ -109,7 +109,7 @@ public struct StressTesterTool {
     }
 
     var collector: PerformanceDataCollector? = nil
-    if let statsFile = arguments.get(statsOutputFile) {
+    if arguments.get(statsOutputFile) != nil {
       collector = PerformanceDataCollector()
       options.listener = collector
     }

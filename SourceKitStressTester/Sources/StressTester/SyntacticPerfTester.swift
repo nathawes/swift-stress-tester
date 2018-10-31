@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
-import SwiftLang
+import SwiftSourceKit
 import SwiftSyntax
 import Common
 
@@ -78,5 +78,5 @@ struct SyntacticPerfTester {
 }
 
 struct SyntacticPerfTesterOptions {
-  var rewriteMode: RewriteMode = .none
+  var rewriteMode: RewriteMode = .basic
 }

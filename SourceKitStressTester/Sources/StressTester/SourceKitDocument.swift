@@ -19,7 +19,7 @@ struct SourceKitDocument {
   let file: String
   let args: [String]
   let containsErrors: Bool
-  let connection: SourceKitdService
+  let connection: SwiftSourceKitFramework
   let listener: RequestListener?
 
   private var deserializer: SyntaxTreeDeserializer? = nil
@@ -34,7 +34,7 @@ struct SourceKitDocument {
     return DocumentInfo(path: file, modification: modification)
   }
 
-  init(_ file: String, args: [String], connection: SourceKitdService, containsErrors: Bool = false, listener: RequestListener? = nil) {
+  init(_ file: String, args: [String], connection: SwiftSourceKitFramework, containsErrors: Bool = false, listener: RequestListener? = nil) {
     self.file = file
     self.args = args
     self.containsErrors = containsErrors
