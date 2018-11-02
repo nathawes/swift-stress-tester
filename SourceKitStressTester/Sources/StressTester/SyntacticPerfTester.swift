@@ -14,10 +14,11 @@ import Foundation
 import SwiftSourceKit
 import SwiftSyntax
 import Common
+import Basic
 
 struct SyntacticPerfTester {
   let file: URL
-  let connection: SourceKitdService
+  let connection: SwiftSourceKitFramework
   let options: SyntacticPerfTesterOptions
   let collector: PerformanceDataCollector
 
@@ -25,24 +26,33 @@ struct SyntacticPerfTester {
     self.file = file
     self.collector = collector
     self.options = options
-    self.connection = SourceKitdService()
+    self.connection = try! SwiftSourceKitFramework()
   }
 
-  var generator: ActionGenerator {
-    switch options.rewriteMode {
+  var generator: ActionGenerator? {
+    switch options.editMode {
     case .none:
-      return RequestActionGenerator()
-    case .basic:
-      return RewriteActionGenerator()
-    case .insideOut:
-      return InsideOutRewriteActionGenerator()
-    case .concurrent:
-      return ConcurrentRewriteActionGenerator()
+      return nil
+    case .reinsertTokenByToken:
+      return ReinsertEditActionGenerator()
+    case .reinsertMostDeeplyNestedToken:
+      return RepeatEditActionGenerator(repeatCount: options.repeatCount)
+    }
+  }
+
+  var walker: SyntaxVisitor? {
+    switch options.walkMode {
+    case .none:
+      return nil
+    case .countNodes:
+      return CountingVisitor()
+    case .computeNodeLocations:
+      return LocationComputingVisitor()
     }
   }
 
   func computeActions(from tree: SourceFileSyntax) -> [Action] {
-    return generator
+    return generator?
       .generate(for: tree)
       .filter { action in
         switch action {
@@ -53,23 +63,41 @@ struct SyntacticPerfTester {
         case .replaceText:
           return true
         }
-      }
+      } ?? []
   }
 
   func run() throws {
     var document = SourceKitDocument(file.path, args: [], connection: connection, containsErrors: true, listener: collector)
 
-    // compute the actions for the entire tree
-    let (tree, _) = try document.open()
+    collector.stopListening()
+    let (tree, _) = try document.open(mode: .syntaxTreeByte)
+    collector.resumeListening()
 
-    for action in computeActions(from: tree) {
+
+    // test first open performance
+    for _ in 0..<options.repeatCount {
+      _ = try document.close()
+      _ = try document.open(mode: .syntaxTreeByte)
+    }
+
+    // test edit performance
+    for action in computeActions(from: tree!) {
       switch action {
       case .cursorInfo: fallthrough
       case .codeComplete: fallthrough
       case .rangeInfo:
         fatalError("Didn't filter out semantic request")
       case .replaceText(let range, let text):
-        _ = try document.replaceText(range: range, text: text)
+        _ = try document.replaceText(range: range, text: text, mode: .syntaxTreeByte)
+      }
+    }
+
+    // test tree walk performance
+    if let walker = self.walker {
+      for _ in 0..<options.repeatCount {
+        let timeBeforeWalk = Date()
+        walker.visit(tree!)
+        collector.finishedTreeWalk(after: -timeBeforeWalk.timeIntervalSinceNow)
       }
     }
 
@@ -77,6 +105,20 @@ struct SyntacticPerfTester {
   }
 }
 
+enum EditMode {
+  case none
+  case reinsertTokenByToken
+  case reinsertMostDeeplyNestedToken
+}
+
+enum WalkMode {
+  case none
+  case countNodes
+  case computeNodeLocations
+}
+
 struct SyntacticPerfTesterOptions {
-  var rewriteMode: RewriteMode = .basic
+  var repeatCount: Int = 100
+  var editMode: EditMode = .reinsertMostDeeplyNestedToken
+  var walkMode: WalkMode = .countNodes
 }

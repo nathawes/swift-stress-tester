@@ -10,10 +10,41 @@
 //
 //===----------------------------------------------------------------------===//
 
-import SwiftLang
+import SwiftSourceKit
+import CSourcekitd
 import SwiftSyntax
 import Common
 import Foundation
+
+enum SyntacticInfoMode {
+  case syntaxTreeJson
+  case syntaxTreeByte
+  case syntaxMap
+
+  func updateRequest(_ request: SKRequestDictionary, connection: SwiftSourceKitFramework, incremental: Bool) {
+    switch self {
+    case .syntaxTreeJson:
+      request[connection.keys.enablesyntaxmap] = 0
+      request[connection.keys.enablesubstructure] = 0
+      request[connection.keys.syntaxtreetransfermode] = incremental
+        ? connection.values.syntaxtree_transfer_incremental
+        : connection.values.syntaxtree_transfer_full
+      request[connection.keys.syntax_tree_serialization_format] = connection.values.syntaxtree_serialization_format_json
+    case .syntaxTreeByte:
+      request[connection.keys.enablesyntaxmap] = 0
+      request[connection.keys.enablesubstructure] = 0
+      request[connection.keys.syntaxtreetransfermode] = incremental
+        ? connection.values.syntaxtree_transfer_incremental
+        : connection.values.syntaxtree_transfer_full
+      request[connection.keys.syntax_tree_serialization_format] = connection.values.syntaxtree_serialization_format_bytetree
+    case .syntaxMap:
+      request[connection.keys.syntaxtreetransfermode] = connection.values.syntaxtree_transfer_off
+      request[connection.keys.enablesyntaxmap] = 1
+      request[connection.keys.enablesubstructure] = 1
+    }
+    request[connection.keys.syntactic_only] = 1
+  }
+}
 
 struct SourceKitDocument {
   let file: String
@@ -42,227 +73,255 @@ struct SourceKitDocument {
     self.listener = listener
   }
 
-  mutating func open(state: SourceState? = nil) throws -> (SourceFileSyntax, SourceKitdResponse) {
-    let request = SourceKitdRequest(uid: .request_EditorOpen)
+  mutating func open(state: SourceState? = nil, mode: SyntacticInfoMode = .syntaxMap) throws -> (SourceFileSyntax?, SKResponseDictionary) {
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.editor_open
 
     if let state = state {
       sourceState = state
-      request.addParameter(.key_SourceText, value: state.source)
+      request[connection.keys.sourcetext] = state.source
     } else {
-      request.addParameter(.key_SourceFile, value: file)
+      request[connection.keys.sourcefile] = file
     }
-    request.addParameter(.key_Name, value: file)
-    request.addParameter(.key_EnableSyntaxMap, value: 0)
-    request.addParameter(.key_EnableStructure, value: 0)
-    request.addParameter(.key_SyntaxTreeTransferMode, value: .kind_SyntaxTreeFull)
-    request.addParameter(.key_SyntaxTreeSerializationFormat, value: .kind_SyntaxTreeSerializationJSON)
-    request.addParameter(.key_SyntacticOnly, value: 1)
+    request[connection.keys.name] = file
+    mode.updateRequest(request, connection: connection, incremental: false)
 
-    let compilerArgs = request.addArrayParameter(.key_CompilerArgs)
-    for arg in args { compilerArgs.add(arg) }
+    let compilerArgs = SKRequestArray(sourcekitd: connection)
+    for arg in args { compilerArgs.append(arg) }
+    request[connection.keys.compilerargs] = compilerArgs
 
     let info = RequestInfo.editorOpen(document: documentInfo)
-    let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
+    let result = try sendWithTimeout(request, info: info)
+    let response = try throwIfInvalid(result, request: info)
 
     deserializer = SyntaxTreeDeserializer()
-    try updateSyntaxTree(response, request: info)
+    try updateSyntaxTree(response, request: info, mode: mode)
 
-    return (tree!, response)
+    return (tree, response)
   }
 
-  mutating func close() throws -> SourceKitdResponse {
+  mutating func close() throws -> SKResponseDictionary {
     sourceState = nil
 
-    let request = SourceKitdRequest(uid: .request_EditorClose)
-    request.addParameter(.key_SourceFile, value: file)
-    request.addParameter(.key_Name, value: file)
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.editor_close
+
+    request[connection.keys.sourcefile] = file
+    request[connection.keys.name] = file
 
     let info = RequestInfo.editorClose(document: documentInfo)
     let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
-    return response
+    return try throwIfInvalid(response, request: info)
   }
 
-  func rangeInfo(start: SourcePosition, length: Int) throws -> SourceKitdResponse {
-    let request = SourceKitdRequest(uid: .request_RangeInfo)
+  func rangeInfo(start: SourcePosition, length: Int) throws -> SKResponseDictionary {
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.rangeinfo
 
-    request.addParameter(.key_SourceFile, value: file)
-    request.addParameter(.key_Offset, value: start.offset)
-    request.addParameter(.key_Length, value: length)
-    request.addParameter(.key_RetrieveRefactorActions, value: 1)
+    request[connection.keys.sourcefile] = file
+    request[connection.keys.offset] = start.offset
+    request[connection.keys.length] = length
+    request[connection.keys.retrieve_refactor_actions] = 1
 
-    let compilerArgs = request.addArrayParameter(.key_CompilerArgs)
-    for arg in args { compilerArgs.add(arg) }
+    let compilerArgs = SKRequestArray(sourcekitd: connection)
+    for arg in args { compilerArgs.append(arg) }
+    request[connection.keys.compilerargs] = compilerArgs
 
     let info = RequestInfo.rangeInfo(document: documentInfo, offset: start.offset, length: length, args: args)
-    let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
+    let result = try sendWithTimeout(request, info: info)
+    let response = try throwIfInvalid(result, request: info)
 
-    if let actions = response.value.getOptional(.key_RefactorActions)?.getArray() {
-      for i in 0 ..< actions.count {
-        let action = actions.getDictionary(i)
-        let actionName = action.getString(.key_ActionName)
-        let kind = action.getUID(.key_ActionUID)
+    if let actions: SKResponseArray = response[connection.keys.refactor_actions] {
+      try actions.forEach { int, action in
+        let actionName: String = action[connection.keys.actionname]!
+        let kind: sourcekitd_uid_t = action[connection.keys.actionuid]!
         _ = try semanticRefactoring(actionKind: kind, actionName: actionName,
                                     position: start)
+        return true
       }
     }
 
     return response
   }
 
-  func cursorInfo(position: SourcePosition) throws -> SourceKitdResponse {
-    let request = SourceKitdRequest(uid: .request_CursorInfo)
+  func cursorInfo(position: SourcePosition) throws -> SKResponseDictionary {
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.cursorinfo
 
-    request.addParameter(.key_SourceFile, value: file)
-    request.addParameter(.key_Offset, value: position.offset)
-    request.addParameter(.key_RetrieveRefactorActions, value: 1)
+    request[connection.keys.sourcefile] = file
+    request[connection.keys.offset] = position.offset
+    request[connection.keys.retrieve_refactor_actions] = 1
 
-    let compilerArgs = request.addArrayParameter(.key_CompilerArgs)
-    for arg in args { compilerArgs.add(arg) }
+    let compilerArgs = SKRequestArray(sourcekitd: connection)
+    for arg in args { compilerArgs.append(arg) }
+    request[connection.keys.compilerargs] = compilerArgs
 
     let info = RequestInfo.cursorInfo(document: documentInfo, offset: position.offset, args: args)
-    let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
+    let result = try sendWithTimeout(request, info: info)
+    let response = try throwIfInvalid(result, request: info)
 
     if !containsErrors {
-      if let typeName = response.value.getOptional(.key_TypeName)?.getString(), typeName.contains("<<error type>>") {
-        throw SourceKitError.failed(.errorTypeInResponse, request: info, response: response.value.description)
+      if let typeName: String = response[connection.keys.typename], typeName.contains("<<error type>>") {
+        throw SourceKitError.failed(.errorTypeInResponse, request: info, response: response.description)
       }
     }
 
-    let symbolName = response.value.getOptional(.key_Name)?.getString()
-    if let actions = response.value.getOptional(.key_RefactorActions)?.getArray() {
-      for i in 0 ..< actions.count {
-        let action = actions.getDictionary(i)
-        let actionName = action.getString(.key_ActionName)
-        guard actionName != "Global Rename" else { continue }
-        let kind = action.getUID(.key_ActionUID)
+    let symbolName: String? = response[connection.keys.name]
+    if let actions: SKResponseArray = response[connection.keys.refactor_actions] {
+      try actions.forEach { int, action in
+        let actionName: String = action[connection.keys.actionname]!
+        guard actionName != "Global Rename" else { return true }
+        let kind: sourcekitd_uid_t = action[connection.keys.actionuid]!
         _ = try semanticRefactoring(actionKind: kind, actionName: actionName,
                                     position: position, newName: symbolName)
+        return true
       }
     }
 
     return response
   }
 
-  func semanticRefactoring(actionKind: SourceKitdUID, actionName: String,
-                           position: SourcePosition, newName: String? = nil) throws -> SourceKitdResponse {
-    let request = SourceKitdRequest(uid: .request_SemanticRefactoring)
+  func semanticRefactoring(actionKind: sourcekitd_uid_t, actionName: String,
+                           position: SourcePosition, newName: String? = nil) throws -> SKResponseDictionary {
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.refactoring
 
-    request.addParameter(.key_ActionUID, value: actionKind)
-    request.addParameter(.key_SourceFile, value: file)
-    request.addParameter(.key_Line, value: position.line)
-    request.addParameter(.key_Column, value: position.column)
+    request[connection.keys.actionuid] = actionKind
+    request[connection.keys.sourcefile] = file
+    request[connection.keys.line] = position.line
+    request[connection.keys.column] = position.column
+
     if let newName = newName, actionName == "Local Rename" {
-      request.addParameter(.key_Name, value: newName)
+      request[connection.keys.name] = newName
     }
-    let compilerArgs = request.addArrayParameter(.key_CompilerArgs)
-    for arg in args { compilerArgs.add(arg) }
+
+    let compilerArgs = SKRequestArray(sourcekitd: connection)
+    for arg in args { compilerArgs.append(arg) }
+    request[connection.keys.compilerargs] = compilerArgs
 
     let info = RequestInfo.semanticRefactoring(document: documentInfo, offset: position.offset, kind: actionName, args: args)
-    let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
+    let result = try sendWithTimeout(request, info: info)
+    let response = try throwIfInvalid(result, request: info)
 
     return response
   }
 
-  func codeComplete(offset: Int) throws -> SourceKitdResponse {
-    let request = SourceKitdRequest(uid: .request_CodeComplete)
+  func codeComplete(offset: Int) throws -> SKResponseDictionary {
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.codecomplete
 
-    request.addParameter(.key_SourceFile, value: file)
-    request.addParameter(.key_Offset, value: offset)
+    request[connection.keys.sourcefile] = file
+    request[connection.keys.offset] = offset
 
-    let compilerArgs = request.addArrayParameter(.key_CompilerArgs)
-    for arg in args { compilerArgs.add(arg) }
+    let compilerArgs = SKRequestArray(sourcekitd: connection)
+    for arg in args { compilerArgs.append(arg) }
+    request[connection.keys.compilerargs] = compilerArgs
 
     let info = RequestInfo.codeComplete(document: documentInfo, offset: offset, args: args)
-    let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
+    let result = try sendWithTimeout(request, info: info)
+    let response = try throwIfInvalid(result, request: info)
 
     return response
   }
 
-  mutating func replaceText(range: SourceRange, text: String) throws -> (SourceFileSyntax, SourceKitdResponse) {
-    let request = SourceKitdRequest(uid: .request_EditorReplaceText)
-    request.addParameter(.key_Name, value: file)
-    request.addParameter(.key_Offset, value: range.start.offset)
-    request.addParameter(.key_Length, value: range.length)
-    request.addParameter(.key_SourceText, value: text)
+  mutating func replaceText(range: SourceRange, text: String, mode: SyntacticInfoMode = .syntaxMap) throws -> (SourceFileSyntax?, SKResponseDictionary) {
+    let request = SKRequestDictionary(sourcekitd: connection)
+    request[connection.keys.request] = connection.requests.editor_replacetext
 
-    request.addParameter(.key_EnableSyntaxMap, value: 0)
-    request.addParameter(.key_EnableStructure, value: 0)
-    request.addParameter(.key_SyntaxTreeTransferMode, value: .kind_SyntaxTreeIncremental)
-    request.addParameter(.key_SyntaxTreeSerializationFormat, value: .kind_SyntaxTreeSerializationJSON)
-    request.addParameter(.key_SyntacticOnly, value: 1)
+    request[connection.keys.name] = file
+    request[connection.keys.offset] = range.start.offset
+    request[connection.keys.length] = range.length
+    request[connection.keys.sourcetext] = text
+
+    mode.updateRequest(request, connection: connection, incremental: true)
+
+    let compilerArgs = SKRequestArray(sourcekitd: connection)
+    for arg in args { compilerArgs.append(arg) }
+    request[connection.keys.compilerargs] = compilerArgs
 
     let info = RequestInfo.editorReplaceText(document: documentInfo, offset: range.start.offset, length: range.length, text: text)
-    let response = try sendWithTimeout(request, info: info)
-    try throwIfInvalid(response, request: info)
+    let result = try sendWithTimeout(request, info: info)
+    let response = try throwIfInvalid(result, request: info)
 
     // update expected source content and syntax tree
     sourceState?.replace(range, with: text)
-    try updateSyntaxTree(response, request: info)
+    try updateSyntaxTree(response, request: info, mode: mode)
 
-    return (tree!, response)
+    return (tree, response)
   }
 
-  private func sendWithTimeout(_ request: SourceKitdRequest, info: RequestInfo) throws -> SourceKitdResponse {
-    var response: SourceKitdResponse? = nil
-    let completed = DispatchSemaphore(value: 0)
+  private func sendWithTimeout(_ request: SKRequestDictionary, info: RequestInfo) throws -> SKResult<SKResponseDictionary> {
+    var response: SKResult<SKResponseDictionary>? = nil
+//    let completed = DispatchSemaphore(value: 0)
     let timeBeforeSend = Date()
-    connection.send(request: request) {
-      response = $0
-      completed.signal()
-    }
-    switch completed.wait(timeout: .now() + DispatchTimeInterval.seconds(60)) {
-    case .success:
-      listener?.receivedResponse(response!.description, for: info, after: -timeBeforeSend.timeIntervalSinceNow)
+    response = connection.sendSync(request)
+//    let handle = connection.send(request) {
+//      response = $0
+//      completed.signal()
+//    }
+//    switch completed.wait(timeout: .now() + DispatchTimeInterval.seconds(60)) {
+//    case .success:
+//      _ = handle
+      listener?.receivedResponse(for: info, after: -timeBeforeSend.timeIntervalSinceNow)
+//      print(response?.description ?? "")
       return response!
-    case .timedOut:
-      throw SourceKitError.timedOut(request: info)
-    }
+//    case .timedOut:
+//      throw SourceKitError.timedOut(request: info)
+//    }
+
   }
 
-  private func throwIfInvalid(_ response: SourceKitdResponse, request: RequestInfo) throws {
-    if response.isCompilerCrash || response.isConnectionInterruptionError {
-      throw SourceKitError.crashed(request: request)
-    }
-    // FIXME: We don't supply a valid new name for initializer calls for local
-    // rename requests. Ignore these errors for now.
-    if response.isError, !response.description.contains("does not match the arity of the old name") {
-      throw SourceKitError.failed(.errorResponse, request: request, response: response.description.chomp())
+  private func throwIfInvalid(_ result: SKResult<SKResponseDictionary>, request: RequestInfo) throws -> SKResponseDictionary {
+//    if response.isCompilerCrash || response.isConnectionInterruptionError {
+//      throw SourceKitError.crashed(request: request)
+//    }
+//    // FIXME: We don't supply a valid new name for initializer calls for local
+//    // rename requests. Ignore these errors for now.
+//    if response.isError, !response.description.contains("does not match the arity of the old name") {
+//      throw SourceKitError.failed(.errorResponse, request: request, response: response.description.chomp())
+//    }
+
+    switch result {
+    case .success(let dict):
+      return dict
+    case .failure(_):
+      // FIXME: Actually do this check properly
+      fatalError("didn't handle reponse!!!!!")
     }
   }
 
   @discardableResult
-  private mutating func updateSyntaxTree(_ response: SourceKitdResponse, request: RequestInfo) throws -> SourceFileSyntax? {
+  private mutating func updateSyntaxTree(_ response: SKResponseDictionary, request: RequestInfo, mode: SyntacticInfoMode) throws -> SourceFileSyntax? {
     precondition(deserializer != nil)
 
-    guard let treeJSON = response.value.getOptional(.key_SerializedSyntaxTree)?.getString() else {
-      return nil
-    }
-    guard let treeData = treeJSON.data(using: .utf8) else {
-      throw SourceKitError.failed(.errorDeserializingSyntaxTree, request: request, response: response.description)
-    }
-
-    let tree: SourceFileSyntax
+    let timeBeforeDeserialization = Date()
     do {
-      tree = try deserializer!.deserialize(treeData, serializationFormat: .json)
-      self.tree = tree
+      switch mode {
+      case .syntaxTreeJson:
+        guard let treeJson: String = response[connection.keys.serialized_syntax_tree] else { return nil }
+        let tree = try deserializer!.deserialize(treeJson.data(using: .utf8)!, serializationFormat: .json)
+        listener?.deserializedTree(for: request, after: -timeBeforeDeserialization.timeIntervalSinceNow)
+        self.tree = tree
+      case .syntaxTreeByte:
+        guard let treeData: Data = response[connection.keys.serialized_syntax_tree] else { return nil }
+        let tree = try deserializer!.deserialize(treeData, serializationFormat: .byteTree)
+        listener?.deserializedTree(for: request, after: -timeBeforeDeserialization.timeIntervalSinceNow)
+        self.tree = tree
+      case .syntaxMap:
+        return nil
+      }
     } catch {
       throw SourceKitError.failed(.errorDeserializingSyntaxTree, request: request, response: response.description)
     }
 
-    if let state = sourceState, state.source != tree.description {
+    if let state = sourceState, state.source != tree!.description {
       // FIXME: add state and tree descriptions in their own field
       let comparison = """
         \(response.description)
         --source-state------
         \(state.source)
         --tree-description--
-        \(tree.description)
+        \(tree!.description)
         --end---------------
         """
       throw SourceKitError.failed(.sourceAndSyntaxTreeMismatch, request: request, response: comparison)
@@ -298,5 +357,6 @@ struct SourceState {
 }
 
 protocol RequestListener {
-  func receivedResponse(_ response: String, for request: RequestInfo, after seconds: TimeInterval)
+  func receivedResponse(for request: RequestInfo, after seconds: TimeInterval)
+  func deserializedTree(for request: RequestInfo, after seconds: TimeInterval)
 }

@@ -177,6 +177,51 @@ final class ConcurrentRewriteActionGenerator: ActionGenerator {
   }
 }
 
+/// Repeatedly removes and re-inserts the most deeply nested token
+final class RepeatEditActionGenerator: ActionGenerator {
+  var actions = [Action]()
+  var repeatCount: Int
+
+  init(repeatCount: Int = 1000) {
+    self.repeatCount = repeatCount
+  }
+
+  func generate(for tree: SourceFileSyntax) -> [Action] {
+    let tokenData = TokenData(of: tree)
+    guard let max = tokenData.depths.max(by: { a, b in a.value < b.value }) else {
+      return actions
+    }
+    let range = SourceRange(of: max.key)
+
+    for _ in 0..<repeatCount {
+      actions.append(contentsOf: [
+        .replaceText(range: range, text: ""),
+        .replaceText(range: SourceRange(of: range.start), text: max.key.description)
+      ])
+    }
+
+    return actions
+  }
+}
+
+/// Removes and reinserts every token in the file, top to bottom
+final class ReinsertEditActionGenerator: ActionGenerator {
+  var actions = [Action]()
+
+  func generate(for tree: SourceFileSyntax) -> [Action] {
+    let tokenData = TokenData(of: tree)
+    for token in tokenData.tokens {
+      let range = SourceRange(of: token, includingTrivia: false)
+      actions.append(contentsOf: [
+        .replaceText(range: range, text: ""),
+        .replaceText(range: SourceRange(of: SourcePosition(of: token, includingTrivia: false)), text: token.description)
+      ])
+    }
+
+    return actions
+  }
+}
+
 
 /// Works through the given source files, first removing their content, then
 /// re-introducing it token by token, from the most deeply nested token to the

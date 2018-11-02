@@ -14,20 +14,21 @@ import Foundation
 import SwiftSourceKit
 import SwiftSyntax
 import Common
+import Basic
 
 struct StressTester {
   let file: URL
   let source: String
   let compilerArgs: [String]
   let options: StressTesterOptions
-  let connection: SourceKitdService
+  let connection: SwiftSourceKitFramework
 
   init(for file: URL, compilerArgs: [String], options: StressTesterOptions) {
     self.file = file
     self.source = try! String(contentsOf: file, encoding: .utf8)
     self.compilerArgs = compilerArgs
     self.options = options
-    self.connection = SourceKitdService()
+    self.connection = try! SwiftSourceKitFramework()
   }
 
   var generator: ActionGenerator {
@@ -99,7 +100,7 @@ struct StressTester {
     var document = SourceKitDocument(file.path, args: compilerArgs, connection: connection, listener: options.listener)
 
     let (tree, _) = try document.open()
-    let (state, actions) = self.computeStartStateAndActions(from: tree)
+    let (state, actions) = self.computeStartStateAndActions(from: tree!)
 
     // The action reording below requires no actions that modify the source
     // buffer are present
@@ -147,7 +148,7 @@ struct StressTester {
 
     // compute the actions for the entire tree
     let (tree, _) = try document.open()
-    let (state, actions) = computeStartStateAndActions(from: tree)
+    let (state, actions) = computeStartStateAndActions(from: tree!)
 
     // reopen the document in the starting state
     _ = try document.close()
